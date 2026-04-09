@@ -291,7 +291,6 @@ class FSScheduler {
         if cs >= self.nextWakeup && !self.timedTasks.isEmpty {
             let task = self.timedTasks[0]
             task.task()
-            let priority = self.timedTasksPriorities[0]
             self.timedTasks.removeFirst()
             self.timedTasksPriorities.removeFirst()
             self.timedTasksExecutionTimes.removeFirst()
