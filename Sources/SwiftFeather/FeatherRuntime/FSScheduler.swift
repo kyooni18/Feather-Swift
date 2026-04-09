@@ -317,7 +317,7 @@ class FSScheduler {
     }
     
     init(
-        fstime: FSTime = FSTime(getms: {return 0})
+        fstime: FSTime = FSTime(getms: { 0 })
     ) {
         self.fstime = fstime
         
