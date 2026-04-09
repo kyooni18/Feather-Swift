@@ -298,6 +298,7 @@ class FSScheduler {
             self.nextWakeup = self.timedTasksExecutionTimes.first ?? 0
             if case let .repeative(parentId) = task.sourceType,
                     let repeatTask = self.repeativeTasks.first(where: { $0.id == parentId }) {
+               repeatTask.hasPendingInstance = false
                 self.fillRepeativeTask(repeatTask)
             }
 
