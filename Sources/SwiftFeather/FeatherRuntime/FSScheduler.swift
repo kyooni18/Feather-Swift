@@ -20,16 +20,24 @@ class FSSchedulerTimedTask {
     let executionTime: UInt64
     let id: UInt64
 
+    let sourceType: SourceType
+    enum SourceType {
+        case deferred
+        case repeative(parentId: UInt64)
+    }
+
     init(
         task: @escaping () -> Void,
         priority: Int = 0,
         executionTime: UInt64,
-        id: UInt64 = 0
-        ) {
+        id: UInt64 = 0,
+        sourceType: SourceType = .deferred
+    ) {
         self.task = task
         self.priority = Int8(priority)
         self.executionTime = executionTime
         self.id = id
+        self.sourceType = sourceType
     }
 }
 
@@ -56,25 +64,32 @@ class FSSchedulerRepeativeTask {
     enum RepeatCycleType {
         case relative, absolute
     }
-    
+
     let task: () -> Void
     let priority: Int8
-    let executionTime: UInt64
+    let startTime: UInt64
+    let period: UInt64
     let repeatType: RepeatCycleType
     let id: UInt64
-    
+
+    var lastScheduledTime: UInt64?
+    var hasPendingInstance: Bool = false
+
     init(
         task: @escaping () -> Void,
         priority: Int = 0,
-        executionTime: UInt64,
+        startTime: UInt64,
+        period: UInt64,
         repeatType: RepeatCycleType = .relative,
         id: UInt64 = 0
     ) {
         self.task = task
         self.priority = Int8(priority)
-        self.executionTime = executionTime
+        self.startTime = startTime
+        self.period = period
         self.repeatType = repeatType
         self.id = id
+        self.lastScheduledTime = nil
     }
 }
 
@@ -172,10 +187,26 @@ class FSScheduler {
         self.instantTaskPriorities.insert(task.priority, at: index)
     }
     
-    func addTimedTask(_ task: FSSchedulerTimedTask) {
+    func addDeferredTask(_ task: FSSchedulerDeferredTask) {
+        let timed = FSSchedulerTimedTask(
+        task: task.task,
+        priority: Int(task.priority),
+        executionTime: task.executionTime,
+        id: task.id,
+        sourceType: .deferred
+        )
+        self.insertTimedTask(timed)
+    }
+    
+    func addRepeativeTask(_ task: FSSchedulerRepeativeTask) {
+        self.repeativeTasks.append(task)
+        self.fillRepeativeTask(task)
+    }
+    
+    private func insertTimedTask(_ task: FSSchedulerTimedTask) {
         let startIndex = self.lowerBoundExecutionTime(task.executionTime)
         let endIndex = self.upperBoundExecutionTime(task.executionTime)
-        
+
         let insertionIndex: Int
         if startIndex == endIndex {
             insertionIndex = startIndex
@@ -187,15 +218,71 @@ class FSScheduler {
             )
             insertionIndex = startIndex + budgetIndex
         }
-        
+
         self.timedTasks.insert(task, at: insertionIndex)
         self.timedTasksPriorities.insert(task.priority, at: insertionIndex)
         self.timedTasksExecutionTimes.insert(task.executionTime, at: insertionIndex)
-        
-        if let firstExecutionTime = self.timedTasksExecutionTimes.first {
-            self.nextWakeup = firstExecutionTime
-        } else {
-            self.nextWakeup = 0
+        self.nextWakeup = self.timedTasksExecutionTimes.first ?? 0
+    }
+
+    private func fillRepeativeTask(_ task: FSSchedulerRepeativeTask) {
+        let now = self.fstime.getms()
+        let limit = now + 2000
+
+        switch task.repeatType {
+        case .absolute:
+            var nextTime: UInt64
+
+            if let last = task.lastScheduledTime {
+                nextTime = last + task.period
+            } else if task.startTime >= now {
+                nextTime = task.startTime
+            } else {
+                let delta = now - task.startTime
+                let steps = delta / task.period
+                nextTime = task.startTime + steps * task.period
+                if nextTime < now {
+                    nextTime += task.period
+                }
+            }
+
+            while nextTime <= limit {
+                let timed = FSSchedulerTimedTask(
+                    task: task.task,
+                    priority: Int(task.priority),
+                    executionTime: nextTime,
+                    id: task.id,
+                    sourceType: .repeative(parentId: task.id)
+                )
+                self.insertTimedTask(timed)
+                task.lastScheduledTime = nextTime
+                nextTime += task.period
+            }
+
+        case .relative:
+            if task.hasPendingInstance {
+                return
+            }
+
+            let nextTime: UInt64
+            if let last = task.lastScheduledTime {
+                nextTime = last + task.period
+            } else {
+                nextTime = max(task.startTime, now)
+            }
+
+            guard nextTime <= limit else { return }
+
+            let timed = FSSchedulerTimedTask(
+                task: task.task,
+                priority: Int(task.priority),
+                executionTime: nextTime,
+                id: task.id,
+                sourceType: .repeative(parentId: task.id)
+            )
+            self.insertTimedTask(timed)
+            task.lastScheduledTime = nextTime
+            task.hasPendingInstance = true
         }
     }
     
@@ -208,6 +295,14 @@ class FSScheduler {
             self.timedTasks.removeFirst()
             self.timedTasksPriorities.removeFirst()
             self.timedTasksExecutionTimes.removeFirst()
+            self.nextWakeup = self.timedTasksExecutionTimes.first ?? 0
+            if case let .repeative(parentId) = task.sourceType,
+                    let repeatTask = self.repeativeTasks.first(where: { $0.id == parentId }) {
+                self.fillRepeativeTask(repeatTask)
+            }
+
+
+            
             return .success
         }
         if !self.instantTasks.isEmpty {
